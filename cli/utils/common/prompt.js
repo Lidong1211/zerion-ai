@@ -3,6 +3,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { readFileSync, statSync } from "node:fs";
 
 export function readSecret(prompt, { mask = false } = {}) {
   return new Promise((resolve) => {
@@ -80,6 +81,66 @@ export async function readPassphrase({ confirm = false } = {}) {
 
     return passphrase;
   }
+}
+
+/**
+ * Read a passphrase from a file. Used for non-interactive automation
+ * (CI, headless servers, scripted agent setup).
+ *
+ * Security: on POSIX, refuse to read the file unless it is mode 0600
+ * AND owned by the current uid. The passphrase unlocks the keystore —
+ * same threat model as an SSH private key, same perm + ownership
+ * requirement. Without the uid check, a symlink at the given path
+ * could resolve to another user's 0600 file on a shared host. Perm
+ * and ownership checks are skipped on Windows (POSIX mode bits and
+ * uid are not meaningful there; use NTFS ACLs instead).
+ *
+ * Strips exactly one trailing newline (\n or \r\n) — passphrases may
+ * legitimately contain leading/trailing spaces, so don't .trim().
+ */
+export function readPassphraseFromFile(path) {
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      throw new Error(`Passphrase file not found: ${path}`);
+    }
+    throw new Error(`Cannot read passphrase file: ${err.message}`);
+  }
+
+  if (!stat.isFile()) {
+    throw new Error(`Passphrase file is not a regular file: ${path}`);
+  }
+
+  if (process.platform !== "win32") {
+    if ((stat.mode & 0o077) !== 0) {
+      const got = (stat.mode & 0o777).toString(8).padStart(3, "0");
+      throw new Error(
+        `Passphrase file ${path} has insecure permissions (mode ${got}). ` +
+          `Run: chmod 600 ${path}`
+      );
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error(
+        `Passphrase file ${path} is not owned by the current user (uid ${stat.uid}). ` +
+          `Refusing to read another user's file.`
+      );
+    }
+  }
+
+  const raw = readFileSync(path, "utf8");
+  const passphrase = raw.endsWith("\r\n")
+    ? raw.slice(0, -2)
+    : raw.endsWith("\n")
+      ? raw.slice(0, -1)
+      : raw;
+
+  if (!passphrase) {
+    throw new Error(`Passphrase file is empty: ${path}`);
+  }
+
+  return passphrase;
 }
 
 /**
