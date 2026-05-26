@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { resolveAuth, resolveApiKeyAuth, basicAuthHeader } from "#zerion/utils/api/auth.js";
+import { resolveAuth, resolveApiKeyAuth, basicAuthHeader, getApiKeyTier } from "#zerion/utils/api/auth.js";
 
 // Synthetic keys that pass the format detectors but are never used for
 // actual crypto operations — resolveAuth is pure and doesn't touch the network.
@@ -214,5 +214,61 @@ describe("basicAuthHeader", () => {
     const header = basicAuthHeader("key+with/special=chars");
     const decoded = Buffer.from(header.replace("Basic ", ""), "base64").toString();
     assert.equal(decoded, "key+with/special=chars:");
+  });
+});
+
+// AC 21a — getApiKeyTier classification. The Zerion dev API key (`zk_dev_*`)
+// is throttled at 120 req/min; paid keys have substantially higher limits.
+// Callers (consolidate) auto-size concurrency from this signal, so the
+// classification must be exact and stable.
+//
+// `zk_dev_*` is the only documented prefix. Anything else with a key is
+// conservatively classified as paid — risking too-aggressive concurrency on
+// a typo is preferable to silently capping a real paid customer at dev
+// throughput. A garbage key still fails the underlying API call quickly.
+//
+// We pass the key directly via the `keyOverride` test seam so the test never
+// observes whatever the dev's local config has stored at ~/.zerion/config.json
+// (otherwise `getApiKey()` would fall through to that and the "missing" case
+// would falsely classify as "paid").
+describe("getApiKeyTier — classification", () => {
+  it("classifies `zk_dev_*` as dev", () => {
+    assert.equal(getApiKeyTier("zk_dev_abc123"), "dev");
+  });
+
+  it("classifies `zk_prod_*` as paid (a plausible non-dev prefix)", () => {
+    assert.equal(getApiKeyTier("zk_prod_abc123"), "paid");
+  });
+
+  it("classifies `zk_live_*` as paid (another plausible non-dev prefix)", () => {
+    assert.equal(getApiKeyTier("zk_live_xyz789"), "paid");
+  });
+
+  it("classifies bare `zk_*` (no second segment) as paid", () => {
+    assert.equal(getApiKeyTier("zk_anything"), "paid");
+  });
+
+  it("classifies a non-`zk_` non-empty key as paid (defensive inversion)", () => {
+    // The old behaviour returned "unknown" here, which silently capped
+    // paid customers whose keys don't match the documented `zk_` shape at
+    // dev concurrency. Inversion means a key that fails the API will burn
+    // a few extra request slots before erroring — strictly better than
+    // throttling a real paid customer.
+    assert.equal(getApiKeyTier("pk_prod_abc123"), "paid");
+    assert.equal(getApiKeyTier("not-a-real-key"), "paid");
+    assert.equal(getApiKeyTier("any_other_prefix_abc123"), "paid");
+  });
+
+  it("classifies empty / missing as unknown (callers treat as dev for safety)", () => {
+    assert.equal(getApiKeyTier(""), "unknown");
+  });
+
+  it("classifies `zk_dev_` (bare prefix, no suffix) as dev (startsWith match — acceptable edge)", () => {
+    // The startsWith check is intentionally lax — a malformed `zk_dev_`
+    // with no suffix matches as dev. A real key always has a suffix; this
+    // edge can only arise from a typo or partial paste, in which case the
+    // API call fails anyway. Document the edge so a future reader doesn't
+    // assume a stricter `^zk_dev_[a-z0-9_-]+$` regex.
+    assert.equal(getApiKeyTier("zk_dev_"), "dev");
   });
 });

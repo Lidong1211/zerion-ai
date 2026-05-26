@@ -279,6 +279,136 @@ export function formatBridgeOffers(data) {
   return lines.join("\n");
 }
 
+function formatStatusCell(row) {
+  // Colour-coded status cell with reason annotation. `ready` is green;
+  // `blocked` / `no_route` are red; `skipped` is dim so dust/no-price rows
+  // recede visually.
+  if (row.status === "ready") return `${GREEN}ready${RESET}`;
+  if (row.status === "blocked") return `${RED}blocked${RESET}${row.reason ? ` ${DIM}(${row.reason})${RESET}` : ""}`;
+  if (row.status === "no_route") return `${RED}no_route${RESET}`;
+  return `${DIM}skipped${row.reason ? ` (${row.reason})` : ""}${RESET}`;
+}
+
+function lossCell(value) {
+  if (value == null) return "-";
+  // Loss is reported as a fraction (0.05 = 5% loss). Loss positive → red.
+  // Gain (negative loss) → green, displayed with a `+` prefix and the
+  // absolute magnitude so it reads as `+2.50%` rather than `+-2.50%`.
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  const pctValue = n * 100;
+  const color = pctValue > 0 ? RED : GREEN;
+  const sign = pctValue >= 0 ? "" : "+";
+  return `${color}${sign}${Math.abs(pctValue).toFixed(2)}%${RESET}`;
+}
+
+export function formatConsolidatePlan(data) {
+  // Column widths sized for 80-col terminals. Symbol fits common tickers;
+  // Output gets a wider column because target-token decimals can grow long.
+  const W = { idx: 3, symbol: 10, qty: 14, value: 12, output: 16, loss: 10, status: 22 };
+  const totalWidth = Object.values(W).reduce((a, b) => a + b, 0) + Object.keys(W).length - 1;
+  const rows = data.rows || [];
+
+  const lines = [
+    `${BOLD}Consolidate Plan${RESET} — ${data.chain} → ${data.toToken}` +
+      (data.walletAddress ? `  ${DIM}(${data.walletAddress.slice(0, 8)}…)${RESET}` : "") +
+      "\n",
+  ];
+  if (Number.isFinite(data.concurrency)) {
+    // Surface the tier + provenance ("auto" vs "flag") so it's obvious why
+    // the planner picked a particular concurrency without having to read the
+    // JSON body — important when a dev key silently caps the user's
+    // expectation.
+    const tier = data.apiKeyTier ? `${data.apiKeyTier} key` : "unknown key";
+    const src = data.concurrencySource === "flag" ? "--concurrency" : "auto";
+    lines.push(`  ${DIM}Concurrency:${RESET} ${data.concurrency} ${DIM}(${tier}, ${src})${RESET}\n`);
+  }
+  lines.push(
+    `  ${DIM}${pad("#", W.idx)} ${pad("Symbol", W.symbol)} ${padStart("Qty", W.qty)} ${padStart("Value (USD)", W.value)} ${padStart("Output", W.output)} ${padStart("Loss %", W.loss)} ${pad("Status", W.status)}${RESET}`,
+  );
+  lines.push(`  ${DIM}${"─".repeat(totalWidth)}${RESET}`);
+
+  if (rows.length === 0) {
+    lines.push(`  ${DIM}(no candidate positions)${RESET}`);
+  }
+
+  for (const [i, r] of rows.entries()) {
+    const qty = Number.isFinite(r.quantity) ? Number(r.quantity).toFixed(6) : "-";
+    const value = Number.isFinite(r.value_usd) ? usd(r.value_usd) : "-";
+    const out = Number.isFinite(r.expected_output) ? Number(r.expected_output).toFixed(6) : "-";
+    const loss = lossCell(r.loss_pct);
+    const status = formatStatusCell(r);
+    const row = `  ${pad(i + 1, W.idx)} ${pad(r.symbol || "?", W.symbol)} ${padStart(qty, W.qty)} ${padStart(value, W.value)} ${padStart(out, W.output)} ${padStart(loss, W.loss + 9)} ${status}`;
+    if (r.status === "ready") lines.push(row);
+    else lines.push(`${DIM}${row}${RESET}`);
+  }
+
+  const t = data.totals || {};
+  const expectedUsd = t.expected_output_usd != null ? ` (~${usd(t.expected_output_usd)})` : "";
+  lines.push("");
+  lines.push(
+    `  ${BOLD}${t.ready || 0} ready${RESET}, ${t.blocked || 0} blocked, ${t.skipped || 0} skipped` +
+      (t.no_route ? `, ${t.no_route} no_route` : "") +
+      ` — expected ~${Number(t.expected_output || 0).toFixed(6)} ${data.toToken}${expectedUsd}`,
+  );
+  if (!data.executed) {
+    lines.push(
+      `  ${YELLOW}Re-run with ${BOLD}--execute${RESET}${YELLOW} to broadcast the ready rows.${RESET}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function formatConsolidateResult(data) {
+  const W = { idx: 3, symbol: 10, hash: 18, status: 12, error: 28 };
+  const totalWidth = Object.values(W).reduce((a, b) => a + b, 0) + Object.keys(W).length - 1;
+  const results = data.results || [];
+  const summary = data.summary || {};
+
+  const lines = [
+    `${BOLD}Consolidate Result${RESET} — ${data.chain || "?"} → ${data.toToken || "?"}` +
+      (data.walletAddress ? `  ${DIM}(${data.walletAddress.slice(0, 8)}…)${RESET}` : "") +
+      "\n",
+  ];
+  lines.push(
+    `  ${DIM}${pad("#", W.idx)} ${pad("Symbol", W.symbol)} ${pad("Hash", W.hash)} ${pad("Status", W.status)} ${pad("Error", W.error)}${RESET}`,
+  );
+  lines.push(`  ${DIM}${"─".repeat(totalWidth)}${RESET}`);
+  if (results.length === 0) {
+    lines.push(`  ${DIM}(no swaps executed)${RESET}`);
+  }
+  for (const [i, r] of results.entries()) {
+    const hash = r.hash ? `${r.hash.slice(0, 10)}…${r.hash.slice(-4)}` : "-";
+    const ok = r.status === "success";
+    const status = ok ? `${GREEN}success${RESET}` : `${RED}${r.status || "failed"}${RESET}`;
+    const err = r.error ? padTrunc(r.error, W.error) : pad("-", W.error);
+    lines.push(`  ${pad(i + 1, W.idx)} ${pad(r.symbol, W.symbol)} ${pad(hash, W.hash)} ${pad(status, W.status + 9)} ${err}`);
+  }
+  lines.push("");
+  lines.push(
+    `  ${BOLD}${summary.succeeded || 0} succeeded${RESET}, ${summary.failed || 0} failed`,
+  );
+
+  // The table's Error column truncates at ~27 chars, which buries the actual
+  // reason for any failure ("Quote not executable: Input asset balance is not
+  // enough…" gets clipped to "Quote not executable: Input…"). Print the full
+  // error string per failed row below the summary so operators can act on it
+  // without re-running with --verbose or scraping JSON.
+  if ((summary.failed || 0) > 0) {
+    const failures = results.filter((r) => r.status !== "success");
+    if (failures.length > 0) {
+      lines.push("");
+      lines.push(`  ${RED}Failures:${RESET}`);
+      for (const r of failures) {
+        const msg = r.error || r.status || "(no error message)";
+        lines.push(`    ${r.symbol}: ${msg}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function formatHistory(data) {
   const lines = [`${BOLD}Transactions${RESET} — ${data.wallet.name} (${data.count})\n`];
   for (const tx of data.transactions) {
