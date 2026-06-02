@@ -28,6 +28,7 @@ function printUsage() {
       "wallet list": "List all wallets",
       "wallet fund": "Show deposit addresses for funding",
       "wallet backup --wallet <name>": "Export recovery phrase (mnemonic backup)",
+      "wallet export-key --wallet <name>": "Export raw private key(s) derived from mnemonic (--chain evm|solana|all, --index N)",
       "wallet delete <name>": "Permanently delete a wallet (requires passphrase)",
       "wallet sync --wallet <name>": "Sync wallet to Zerion app via QR code",
       "wallet sync --all": "Sync all wallets to Zerion app",
